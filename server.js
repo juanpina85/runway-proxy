@@ -39,7 +39,7 @@ app.post("/api/runway/generate", async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: "Falta prompt" });
 
- const body = { model: "gen4.5", promptText: prompt, ratio: "768:1344", duration: 10 };
+const body = { model: "gen4.5", promptText: prompt, ratio: "720:1280", duration: 10 };
   console.log("[RUNWAY GENERATE] Enviando:", JSON.stringify(body).slice(0, 200));
 
   try {
