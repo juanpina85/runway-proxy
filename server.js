@@ -2,22 +2,31 @@
 // InstaInfluencer — Runway Proxy Server
 // Node.js + Express
 //
-// Setup:
-//   npm install express cors node-fetch
-//   RUNWAY_API_KEY=key_xxx node server.js
+// Deploy en Railway:
+//   1. Subí este archivo + package.json a GitHub
+//   2. Conectá el repo en railway.app
+//   3. Agregá variable: RUNWAY_API_KEY=key_xxx
 //
 // Endpoints:
+//   GET  /health
 //   POST /api/runway/generate   { prompt } → { taskId }
 //   GET  /api/runway/status/:id            → { status, url? }
 // ─────────────────────────────────────────────────────────────
 
 const express = require("express");
-const cors    = require("cors");
 
 const app  = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
-app.use(cors()); // allow requests from Claude artifact
+// CORS completamente abierto — necesario para llamadas desde Claude artifacts
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
 app.use(express.json());
 
 const RUNWAY_KEY     = process.env.RUNWAY_API_KEY || "";
@@ -25,13 +34,16 @@ const RUNWAY_VERSION = "2024-11-06";
 const RUNWAY_BASE    = "https://api.dev.runwayml.com/v1";
 
 if (!RUNWAY_KEY) {
-  console.error("❌  Falta RUNWAY_API_KEY. Corré: RUNWAY_API_KEY=key_xxx node server.js");
+  console.error("Falta RUNWAY_API_KEY.");
   process.exit(1);
 }
 
-// ── POST /api/runway/generate ──────────────────────────────
-// Body: { prompt: string }
-// Returns: { taskId: string }
+// Health check
+app.get("/health", (_, res) => {
+  res.json({ ok: true, runway: !!RUNWAY_KEY });
+});
+
+// POST /api/runway/generate
 app.post("/api/runway/generate", async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: "Falta prompt" });
@@ -40,15 +52,15 @@ app.post("/api/runway/generate", async (req, res) => {
     const r = await fetch(`${RUNWAY_BASE}/text_to_video`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${RUNWAY_KEY}`,
+        "Content-Type":     "application/json",
+        "Authorization":    `Bearer ${RUNWAY_KEY}`,
         "X-Runway-Version": RUNWAY_VERSION,
       },
       body: JSON.stringify({
-        model: "gen4_turbo",
+        model:      "gen4_turbo",
         promptText: prompt,
-        ratio: "768:1344",
-        duration: 10,
+        ratio:      "768:1344",
+        duration:   10,
       }),
     });
 
@@ -61,15 +73,14 @@ app.post("/api/runway/generate", async (req, res) => {
   }
 });
 
-// ── GET /api/runway/status/:taskId ─────────────────────────
-// Returns: { status: string, url?: string }
+// GET /api/runway/status/:taskId
 app.get("/api/runway/status/:taskId", async (req, res) => {
   const { taskId } = req.params;
 
   try {
     const r = await fetch(`${RUNWAY_BASE}/tasks/${taskId}`, {
       headers: {
-        "Authorization": `Bearer ${RUNWAY_KEY}`,
+        "Authorization":    `Bearer ${RUNWAY_KEY}`,
         "X-Runway-Version": RUNWAY_VERSION,
       },
     });
@@ -78,8 +89,8 @@ app.get("/api/runway/status/:taskId", async (req, res) => {
     if (!r.ok) return res.status(r.status).json({ error: data.message || "Runway error" });
 
     res.json({
-      status: data.status,                    // PENDING | RUNNING | SUCCEEDED | FAILED
-      url:    data.output?.[0] || null,
+      status:  data.status,
+      url:     data.output?.[0] || null,
       failure: data.failure || null,
     });
 
@@ -88,11 +99,7 @@ app.get("/api/runway/status/:taskId", async (req, res) => {
   }
 });
 
-// ── Health check ───────────────────────────────────────────
-app.get("/health", (_, res) => res.json({ ok: true, runway: !!RUNWAY_KEY }));
-
 app.listen(PORT, () => {
-  console.log(`✅  Runway proxy corriendo en http://localhost:${PORT}`);
-  console.log(`   POST http://localhost:${PORT}/api/runway/generate`);
-  console.log(`   GET  http://localhost:${PORT}/api/runway/status/:taskId`);
+  console.log(`Proxy corriendo en puerto ${PORT}`);
 });
+
