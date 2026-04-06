@@ -126,15 +126,14 @@ app.get("/api/runway/status/:taskId", async (req, res) => {
 // POST /api/merge { videoUrls: string[], audioBase64: string }
 // Descarga N clips, los concatena, mezcla el audio TTS, devuelve mp4
 app.post("/api/merge", async (req, res) => {
-  const { videoUrls, audioBase64 } = req.body;
+  const { videoUrls, audioBase64, hook } = req.body;
   if (!videoUrls?.length || !audioBase64) return res.status(400).json({ error: "Faltan videoUrls o audioBase64" });
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "reel-"));
   try {
-    // Descargar todos los clips
+    // Descargar clips
     const clipPaths = [];
     for (let i = 0; i < videoUrls.length; i++) {
-      console.log(`[MERGE] Descargando clip ${i+1}/${videoUrls.length}:`, videoUrls[i]);
       const vRes = await fetch(videoUrls[i]);
       if (!vRes.ok) throw new Error(`No se pudo descargar clip ${i+1}: ${vRes.status}`);
       const buf = Buffer.from(await vRes.arrayBuffer());
@@ -147,25 +146,60 @@ app.post("/api/merge", async (req, res) => {
     const audioPath = path.join(tmp, "audio.mp3");
     fs.writeFileSync(audioPath, Buffer.from(audioBase64, "base64"));
 
+    // Concatenar clips si hay más de uno
     let videoPath;
     if (clipPaths.length === 1) {
       videoPath = clipPaths[0];
     } else {
-      // Concatenar clips con ffmpeg
       const listPath = path.join(tmp, "list.txt");
       fs.writeFileSync(listPath, clipPaths.map(p => `file '${p}'`).join("\n"));
       videoPath = path.join(tmp, "concat.mp4");
-      console.log("[MERGE] Concatenando", clipPaths.length, "clips...");
       execSync(`ffmpeg -y -f concat -safe 0 -i "${listPath}" -c copy "${videoPath}"`, { timeout: 120000 });
     }
 
-    // Mezclar video + audio
-    const outPath = path.join(tmp, "reel.mp4");
-    console.log("[MERGE] Mezclando video + audio...");
+    // Merge video + audio
+    const mergedPath = path.join(tmp, "merged.mp4");
     execSync(
-      `ffmpeg -y -i "${videoPath}" -i "${audioPath}" -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest "${outPath}"`,
+      `ffmpeg -y -i "${videoPath}" -i "${audioPath}" -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest "${mergedPath}"`,
       { timeout: 120000 }
     );
+
+    // Superponer hook como texto si viene en el request
+    const outPath = path.join(tmp, "reel.mp4");
+    if (hook) {
+      // Escapar caracteres especiales para ffmpeg drawtext
+      const hookEscaped = hook
+        .replace(/\\/g, "\\\\")
+        .replace(/'/g, "\\'")
+        .replace(/:/g, "\\:")
+        .replace(/\[/g, "\\[")
+        .replace(/\]/g, "\\]");
+
+      console.log("[MERGE] Agregando hook al video:", hookEscaped.slice(0, 60));
+
+      // drawtext: texto centrado, aparece en primeros 4 segundos, fondo semitransparente
+      const drawtextFilter = [
+        `drawtext=text='${hookEscaped}'`,
+        `fontsize=42`,
+        `fontcolor=white`,
+        `font=DejaVu Sans Bold`,
+        `x=(w-text_w)/2`,
+        `y=h*0.75`,
+        `enable='between(t,0,4)'`,
+        `alpha='if(lt(t,0.3),t/0.3,if(gt(t,3.5),(4-t)/0.5,1))'`,
+        `box=1`,
+        `boxcolor=black@0.55`,
+        `boxborderw=14`,
+        `line_spacing=8`,
+      ].join(":");
+
+      execSync(
+        `ffmpeg -y -i "${mergedPath}" -vf "${drawtextFilter}" -c:a copy "${outPath}"`,
+        { timeout: 180000 }
+      );
+    } else {
+      fs.copyFileSync(mergedPath, outPath);
+    }
 
     const result = fs.readFileSync(outPath);
     console.log("[MERGE] Reel listo, tamaño:", result.length, "bytes");
