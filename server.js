@@ -54,25 +54,25 @@ app.post("/api/tts", async (req, res) => {
   if (!text) return res.status(400).json({ error: "Falta text" });
 
   try {
-    const r = await fetch(OPENAI_TTS, {
+    const r = await fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_KEY}` },
-      body: JSON.stringify({ model: "tts-1", input: text, voice: "onyx", speed: 1.15 }),
+      body: JSON.stringify({
+        model: "gpt-4o-mini-tts",
+        input: text,
+        voice: "onyx",
+        speed: 1.15,
+        instructions: "Habla con acento latinoamericano neutro, como locutor de noticias argentino. Voz masculina joven, dinámica y energética. Ritmo rápido pero claro. Tono intrigante e impactante.",
+      }),
     });
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
       return res.status(r.status).json({ error: e.error?.message || "TTS error" });
     }
     const audioBuf = Buffer.from(await r.arrayBuffer());
-
-    // Calcular duración aproximada del mp3 (128kbps = 16000 bytes/sec)
     const durationSec = Math.ceil(audioBuf.length / 16000);
-    console.log("[TTS] Audio size:", audioBuf.length, "bytes, ~duration:", durationSec, "sec");
-
-    res.json({
-      audioBase64: audioBuf.toString("base64"),
-      durationSec,
-    });
+    console.log("[TTS] Audio:", audioBuf.length, "bytes ~", durationSec, "seg");
+    res.json({ audioBase64: audioBuf.toString("base64"), durationSec });
   } catch (err) {
     console.error("[TTS]", err.message);
     res.status(500).json({ error: err.message });
