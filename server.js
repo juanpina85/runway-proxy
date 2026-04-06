@@ -15,7 +15,6 @@ const RUNWAY_BASE    = "https://api.dev.runwayml.com/v1";
 const CLAUDE_API     = "https://api.anthropic.com/v1/messages";
 const OPENAI_TTS     = "https://api.openai.com/v1/audio/speech";
 
-// CORS
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -23,14 +22,11 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "50mb" }));
 
 // ── Health ────────────────────────────────────────────────
 app.get("/health", (_, res) => res.json({
-  ok: true,
-  claude: !!CLAUDE_KEY,
-  runway: !!RUNWAY_KEY,
-  openai: !!OPENAI_KEY,
+  ok: true, claude: !!CLAUDE_KEY, runway: !!RUNWAY_KEY, openai: !!OPENAI_KEY,
 }));
 
 // ── Claude proxy ──────────────────────────────────────────
@@ -50,12 +46,44 @@ app.post("/api/claude", async (req, res) => {
   }
 });
 
+// ── OpenAI TTS ────────────────────────────────────────────
+// POST /api/tts  { text } → { audioBase64, durationSec }
+app.post("/api/tts", async (req, res) => {
+  if (!OPENAI_KEY) return res.status(500).json({ error: "Falta OPENAI_API_KEY" });
+  const { text } = req.body;
+  if (!text) return res.status(400).json({ error: "Falta text" });
+
+  try {
+    const r = await fetch(OPENAI_TTS, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_KEY}` },
+      body: JSON.stringify({ model: "tts-1", input: text, voice: "onyx", speed: 1.15 }),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      return res.status(r.status).json({ error: e.error?.message || "TTS error" });
+    }
+    const audioBuf = Buffer.from(await r.arrayBuffer());
+
+    // Calcular duración aproximada del mp3 (128kbps = 16000 bytes/sec)
+    const durationSec = Math.ceil(audioBuf.length / 16000);
+    console.log("[TTS] Audio size:", audioBuf.length, "bytes, ~duration:", durationSec, "sec");
+
+    res.json({
+      audioBase64: audioBuf.toString("base64"),
+      durationSec,
+    });
+  } catch (err) {
+    console.error("[TTS]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Runway: crear tarea ───────────────────────────────────
 app.post("/api/runway/generate", async (req, res) => {
   if (!RUNWAY_KEY) return res.status(500).json({ error: "Falta RUNWAY_API_KEY" });
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: "Falta prompt" });
-
   try {
     const r = await fetch(`${RUNWAY_BASE}/text_to_video`, {
       method: "POST",
@@ -67,7 +95,7 @@ app.post("/api/runway/generate", async (req, res) => {
       body: JSON.stringify({ model: "gen4.5", promptText: prompt, ratio: "720:1280", duration: 10 }),
     });
     const text = await r.text();
-    console.log("[RUNWAY GENERATE] Status:", r.status, "Response:", text.slice(0, 300));
+    console.log("[RUNWAY GENERATE] Status:", r.status, text.slice(0, 200));
     let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
     if (!r.ok) return res.status(r.status).json({ error: data.message || data.error || text });
     res.json({ taskId: data.id });
@@ -94,71 +122,53 @@ app.get("/api/runway/status/:taskId", async (req, res) => {
   }
 });
 
-// ── OpenAI TTS ────────────────────────────────────────────
-// POST /api/tts  { text: string } → audio/mpeg
-app.post("/api/tts", async (req, res) => {
-  if (!OPENAI_KEY) return res.status(500).json({ error: "Falta OPENAI_API_KEY" });
-  const { text } = req.body;
-  if (!text) return res.status(400).json({ error: "Falta text" });
-
-  try {
-    const r = await fetch(OPENAI_TTS, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${OPENAI_KEY}` },
-      body: JSON.stringify({
-        model: "tts-1",
-        input: text,
-        voice: "onyx",       // voz masculina, profunda, dinámica
-        speed: 1.15,         // ritmo rápido pero claro
-      }),
-    });
-    if (!r.ok) {
-      const e = await r.json().catch(() => ({}));
-      console.error("[TTS]", r.status, JSON.stringify(e));
-      return res.status(r.status).json({ error: e.error?.message || "TTS error" });
-    }
-    const audioBuffer = Buffer.from(await r.arrayBuffer());
-    res.set("Content-Type", "audio/mpeg");
-    res.send(audioBuffer);
-  } catch (err) {
-    console.error("[TTS]", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── Merge video + audio con ffmpeg ────────────────────────
-// POST /api/merge  { videoUrl, audioUrl } → video/mp4
+// ── Merge video(s) + audio con ffmpeg ─────────────────────
+// POST /api/merge { videoUrls: string[], audioBase64: string }
+// Descarga N clips, los concatena, mezcla el audio TTS, devuelve mp4
 app.post("/api/merge", async (req, res) => {
-  const { videoUrl, audioBase64 } = req.body;
-  if (!videoUrl || !audioBase64) return res.status(400).json({ error: "Faltan videoUrl o audioBase64" });
+  const { videoUrls, audioBase64 } = req.body;
+  if (!videoUrls?.length || !audioBase64) return res.status(400).json({ error: "Faltan videoUrls o audioBase64" });
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "reel-"));
-  const videoPath = path.join(tmp, "video.mp4");
-  const audioPath = path.join(tmp, "audio.mp3");
-  const outPath   = path.join(tmp, "reel.mp4");
-
   try {
-    // Descargar video desde Runway
-    console.log("[MERGE] Descargando video:", videoUrl);
-    const vRes = await fetch(videoUrl);
-    if (!vRes.ok) throw new Error(`No se pudo descargar el video: ${vRes.status}`);
-    const vBuf = Buffer.from(await vRes.arrayBuffer());
-    fs.writeFileSync(videoPath, vBuf);
+    // Descargar todos los clips
+    const clipPaths = [];
+    for (let i = 0; i < videoUrls.length; i++) {
+      console.log(`[MERGE] Descargando clip ${i+1}/${videoUrls.length}:`, videoUrls[i]);
+      const vRes = await fetch(videoUrls[i]);
+      if (!vRes.ok) throw new Error(`No se pudo descargar clip ${i+1}: ${vRes.status}`);
+      const buf = Buffer.from(await vRes.arrayBuffer());
+      const p = path.join(tmp, `clip${i}.mp4`);
+      fs.writeFileSync(p, buf);
+      clipPaths.push(p);
+    }
 
-    // Guardar audio base64
-    const audioBuf = Buffer.from(audioBase64, "base64");
-    fs.writeFileSync(audioPath, audioBuf);
+    // Guardar audio
+    const audioPath = path.join(tmp, "audio.mp3");
+    fs.writeFileSync(audioPath, Buffer.from(audioBase64, "base64"));
 
-    // ffmpeg: combinar — audio dura lo que dure, video se loopea si es más corto
-    console.log("[MERGE] Combinando con ffmpeg...");
+    let videoPath;
+    if (clipPaths.length === 1) {
+      videoPath = clipPaths[0];
+    } else {
+      // Concatenar clips con ffmpeg
+      const listPath = path.join(tmp, "list.txt");
+      fs.writeFileSync(listPath, clipPaths.map(p => `file '${p}'`).join("\n"));
+      videoPath = path.join(tmp, "concat.mp4");
+      console.log("[MERGE] Concatenando", clipPaths.length, "clips...");
+      execSync(`ffmpeg -y -f concat -safe 0 -i "${listPath}" -c copy "${videoPath}"`, { timeout: 120000 });
+    }
+
+    // Mezclar video + audio
+    const outPath = path.join(tmp, "reel.mp4");
+    console.log("[MERGE] Mezclando video + audio...");
     execSync(
       `ffmpeg -y -i "${videoPath}" -i "${audioPath}" -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest "${outPath}"`,
       { timeout: 120000 }
     );
 
     const result = fs.readFileSync(outPath);
-    console.log("[MERGE] Listo, tamaño:", result.length, "bytes");
-
+    console.log("[MERGE] Reel listo, tamaño:", result.length, "bytes");
     res.set("Content-Type", "video/mp4");
     res.set("Content-Disposition", 'attachment; filename="reel.mp4"');
     res.send(result);
