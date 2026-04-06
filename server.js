@@ -166,40 +166,54 @@ app.post("/api/merge", async (req, res) => {
 
     // Superponer hook como texto si viene en el request
     const outPath = path.join(tmp, "reel.mp4");
-    if (hook) {
-      // Escapar caracteres especiales para ffmpeg drawtext
-      const hookEscaped = hook
-        .replace(/\\/g, "\\\\")
-        .replace(/'/g, "\\'")
-        .replace(/:/g, "\\:")
-        .replace(/\[/g, "\\[")
-        .replace(/\]/g, "\\]");
+  if (hook) {
+  const hookEscaped = hook
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\u2019")
+    .replace(/:/g, "\\:")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]")
+    .replace(/,/g, "\\,");
 
-      console.log("[MERGE] Agregando hook al video:", hookEscaped.slice(0, 60));
-
-      // drawtext: texto centrado, aparece en primeros 4 segundos, fondo semitransparente
-      const drawtextFilter = [
-        `drawtext=text='${hookEscaped}'`,
-        `fontsize=42`,
-        `fontcolor=white`,
-        `font=DejaVu Sans Bold`,
-        `x=(w-text_w)/2`,
-        `y=h*0.75`,
-        `enable='between(t,0,4)'`,
-        `alpha='if(lt(t,0.3),t/0.3,if(gt(t,3.5),(4-t)/0.5,1))'`,
-        `box=1`,
-        `boxcolor=black@0.55`,
-        `boxborderw=14`,
-        `line_spacing=8`,
-      ].join(":");
-
-      execSync(
-        `ffmpeg -y -i "${mergedPath}" -vf "${drawtextFilter}" -c:a copy "${outPath}"`,
-        { timeout: 180000 }
-      );
+  // Dividir el hook en líneas de máximo 28 caracteres
+  const words = hookEscaped.split(" ");
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    if ((current + " " + word).trim().length <= 28) {
+      current = (current + " " + word).trim();
     } else {
-      fs.copyFileSync(mergedPath, outPath);
+      if (current) lines.push(current);
+      current = word;
     }
+  }
+  if (current) lines.push(current);
+  const hookMultiline = lines.join("\\n");
+
+  console.log("[MERGE] Hook lines:", lines);
+
+  const drawtextFilter = [
+    `drawtext=text='${hookMultiline}'`,
+    `fontsize=38`,
+    `fontcolor=white`,
+    `font=DejaVu Sans Bold`,
+    `x=(w-text_w)/2`,
+    `y=h*0.72`,
+    `enable='between(t,0,4)'`,
+    `alpha='if(lt(t,0.3),t/0.3,if(gt(t,3.5),(4-t)/0.5,1))'`,
+    `box=1`,
+    `boxcolor=black@0.6`,
+    `boxborderw=16`,
+    `line_spacing=10`,
+  ].join(":");
+
+  execSync(
+    `ffmpeg -y -i "${mergedPath}" -vf "${drawtextFilter}" -c:a copy "${outPath}"`,
+    { timeout: 180000 }
+  );
+} else {
+  fs.copyFileSync(mergedPath, outPath);
+}
 
     const result = fs.readFileSync(outPath);
     console.log("[MERGE] Reel listo, tamaño:", result.length, "bytes");
